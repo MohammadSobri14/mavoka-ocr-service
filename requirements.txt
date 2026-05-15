@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pymupdf
+paddlepaddle
+paddleocr
+easyocr
+openai
+pydantic
+python-multipart
+requests
