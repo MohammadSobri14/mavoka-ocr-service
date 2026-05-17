@@ -141,7 +141,7 @@ def process_document(file_bytes: bytes, filename: str, doc_type: str = "cv") -> 
     elif ext in ["jpg", "jpeg", "png"]:
         img = Image.open(io.BytesIO(file_bytes))
         ocr_result = reader.readtext(np.array(img), detail=0)
-        text = "\\n".join(ocr_result)
+        text = "\n".join(ocr_result)
         confidence = 0.7
         
     else:
