@@ -80,6 +80,11 @@ async def extract_score(file: UploadFile = File(...)):
         # 1. Image OCR specifically handling tables
         raw_text, confidence = process_document(content, file.filename, doc_type="score")
 
+        print(f"\n{'='*60}")
+        print(f"[OCR RAW TEXT for {file.filename}]")
+        print(raw_text)
+        print(f"{'='*60}\n")
+
         # 2. Parse Subject Scores & Average Score using AI
         parsed_data = parse_structured_data(raw_text, doc_type="score")
         
@@ -93,3 +98,25 @@ async def extract_score(file: UploadFile = File(...)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class DebugParseRequest(BaseModel):
+    raw_text: str
+
+@app.post("/debug/parse-score")
+async def debug_parse_score(body: DebugParseRequest):
+    """
+    Debug endpoint: jalankan parser langsung dari raw OCR text.
+    Berguna untuk menguji logika parsing tanpa upload ulang gambar.
+    """
+    from services.llm_parser import _parse_academic_scores, _normalize_ocr_text
+    
+    normalized = _normalize_ocr_text(body.raw_text)
+    result = _parse_academic_scores(body.raw_text)
+    
+    return {
+        "normalized_text": normalized,
+        "subject_scores": result["subject_scores"],
+        "average_score": result["average_score"],
+        "raw_text_lines": body.raw_text.splitlines()
+    }

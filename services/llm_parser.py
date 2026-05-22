@@ -410,6 +410,23 @@ def _parse_academic_scores(raw_text: str) -> dict:
         if not result['subject_scores']:
             # Try to also get subjects even if avg was found via label
             result['subject_scores'] = _layer2_extract_subject_scores(raw_text)
+
+        # ── Cross-validation: compare label average vs calculated average ──────
+        # OCR decimal digits are highly error-prone (e.g., "27" misread as "76").
+        # When we have >= 5 subject scores, the calculated average is MORE reliable
+        # than the OCR-read label value. Use calculated avg if they differ by > 0.3.
+        # (Normal rounding differences will be << 0.3; OCR misread diffs are usually > 0.4)
+        if result['subject_scores'] and len(result['subject_scores']) >= 5:
+            scores = [s['score'] for s in result['subject_scores']]
+            calc_avg = round(sum(scores) / len(scores), 2)
+            discrepancy = abs(result['average_score'] - calc_avg)
+            print(f"[DEBUG] Cross-validation: label_avg={result['average_score']}, calc_avg={calc_avg}, discrepancy={discrepancy:.4f}")
+            if discrepancy > 0.3:
+                print(f"[DEBUG] Cross-validation OVERRIDE: decimal likely misread by OCR. Using calc_avg={calc_avg} over label_avg={result['average_score']}")
+                result['average_score'] = calc_avg
+            else:
+                print(f"[DEBUG] Cross-validation OK: difference {discrepancy:.4f} within tolerance, keeping label_avg={result['average_score']}")
+
         return result
 
     # ── Layer 2: Statistical extraction ────────────────────────────────────────
@@ -492,18 +509,24 @@ def _layer1_regex_average(raw_text: str) -> float:
 
     # ── Strategy B: line-by-line scan ───────────────────────────────────────
     # OCR often puts "RATA-RATA" on one line and the score on the next line.
+    # Key fix: when an integer is found on the rata-rata line, we MUST check the
+    # next line for a 1-2 digit decimal part BEFORE returning the integer alone.
+    # This prevents incorrect combinations like 89+76=89.76 when actual is 89.27
     lines = raw_text.splitlines()
     for i, line in enumerate(lines):
         line_lower = line.strip().lower()
         # Check if this line contains a "rata-rata" label (with various OCR artifacts)
         if re.search(r'rata[\s\-]*rata', line_lower):
-            # First, try to extract a proper decimal from THIS line
+            print(f"[DEBUG] Found rata-rata at line {i}: {repr(line.strip())}")
+
+            # First, try to extract a proper decimal (with comma/dot) from THIS line
             nums_on_line = re.findall(r'(\d{2,3}[.,]\d{1,2})', line)
             if nums_on_line:
                 for ns in nums_on_line:
                     try:
                         v = float(ns.replace(',', '.'))
                         if 30 <= v <= 100:
+                            print(f"[DEBUG] Strategy B - Decimal on same line: {v}")
                             return round(v, 2)
                     except ValueError:
                         continue
@@ -514,49 +537,72 @@ def _layer1_regex_average(raw_text: str) -> float:
                 try:
                     v = float(f"{split_match.group(1)}.{split_match.group(2)}")
                     if 30 <= v <= 100:
+                        print(f"[DEBUG] Strategy B - Split decimal same line: {v}")
                         return round(v, 2)
                 except ValueError:
                     pass
 
-            # Try standalone integer on this line
-            int_nums = re.findall(r'\b(\d{2,3})\b', line)
-            for ns in int_nums:
+            # Check standalone integer on THIS line — but FIRST peek at the next
+            # non-empty line to see if it's a 1-2 digit decimal part (e.g. "27")
+            # CRITICAL FIX: do NOT return integer alone before checking next line
+            int_nums_on_line = re.findall(r'\b(\d{2,3})\b', line)
+            candidate_int = None
+            for ns in int_nums_on_line:
                 try:
-                    v = float(ns)
+                    v = int(ns)
                     if 30 <= v <= 100:
-                        return round(v, 2)
+                        candidate_int = v
+                        break
                 except ValueError:
                     continue
 
-            # If no number on this line, check the NEXT 1-3 lines
-            # Handle case where score is split: line="81" next_line="93" → 81.93
+            # Look at next 1-3 lines for the decimal part or a full decimal value
+            found_in_next = False
             for j in range(i + 1, min(i + 4, len(lines))):
                 next_line = lines[j].strip()
                 if not next_line:
                     continue
 
-                # Try proper decimal
+                print(f"[DEBUG] Strategy B - Checking next line {j}: {repr(next_line)}")
+
+                # Priority 1: full decimal value on next line
                 nums_next = re.findall(r'(\d{2,3}[.,]\d{1,2})', next_line)
                 if nums_next:
                     for ns in nums_next:
                         try:
                             v = float(ns.replace(',', '.'))
                             if 30 <= v <= 100:
+                                print(f"[DEBUG] Strategy B - Full decimal on next line: {v}")
                                 return round(v, 2)
                         except ValueError:
                             continue
 
-                # Try split decimal on next line
+                # Priority 2: split decimal on next line "89, 27"
                 split_next = re.search(r'(\d{2,3})[.,]\s+(\d{1,2})(?!\d)', next_line)
                 if split_next:
                     try:
                         v = float(f"{split_next.group(1)}.{split_next.group(2)}")
                         if 30 <= v <= 100:
+                            print(f"[DEBUG] Strategy B - Split decimal on next line: {v}")
                             return round(v, 2)
                     except ValueError:
                         pass
 
-                # Check if this is a standalone integer that might combine with next line
+                # Priority 3: combine candidate_int from THIS line with lone 1-2 digit on NEXT line
+                # e.g., this line has "89", next line has "27" → 89.27
+                if candidate_int is not None:
+                    lone_decimal = re.match(r'^(\d{1,2})$', next_line)
+                    if lone_decimal:
+                        try:
+                            dec_part = lone_decimal.group(1)
+                            v = float(f"{candidate_int}.{dec_part}")
+                            if 30 <= v <= 100:
+                                print(f"[DEBUG] Strategy B - Combined int+decimal (cross-line): {candidate_int}+{dec_part} = {v}")
+                                return round(v, 2)
+                        except ValueError:
+                            pass
+
+                # Priority 4: next line is standalone int that might combine with ITS next line
                 standalone_int = re.match(r'^(\d{2,3})$', next_line)
                 if standalone_int and j + 1 < len(lines):
                     follow_line = lines[j + 1].strip()
@@ -565,22 +611,40 @@ def _layer1_regex_average(raw_text: str) -> float:
                         try:
                             v = float(f"{standalone_int.group(1)}.{follow_match.group(1)}")
                             if 30 <= v <= 100:
+                                print(f"[DEBUG] Strategy B - Combined across 2 next lines: {v}")
                                 return round(v, 2)
                         except ValueError:
                             pass
 
-                # Standalone integer as-is
-                int_nums = re.findall(r'\b(\d{2,3})\b', next_line)
-                for ns in int_nums:
+                # Priority 5: standalone integer on next line (no decimal found anywhere)
+                # Only use this as LAST resort — grab standalone int from next line
+                int_nums_next = re.findall(r'\b(\d{2,3})\b', next_line)
+                for ns in int_nums_next:
                     try:
                         v = float(ns)
                         if 30 <= v <= 100:
+                            # But before returning, peek at line after this to see if decimal part
+                            if j + 1 < len(lines):
+                                after_line = lines[j + 1].strip()
+                                lone_dec = re.match(r'^(\d{1,2})$', after_line)
+                                if lone_dec:
+                                    combined_v = float(f"{int(v)}.{lone_dec.group(1)}")
+                                    if 30 <= combined_v <= 100:
+                                        print(f"[DEBUG] Strategy B - Int+peek next: {combined_v}")
+                                        return round(combined_v, 2)
+                            print(f"[DEBUG] Strategy B - Standalone int on next line: {v}")
+                            found_in_next = True
                             return round(v, 2)
                     except ValueError:
                         continue
 
-                # If we found a non-empty next line but no score, stop looking
+                # Stop after first non-empty next line processed
                 break
+
+            # If we have a candidate_int from this line and nothing better found in next lines
+            if candidate_int is not None and not found_in_next:
+                print(f"[DEBUG] Strategy B - Fallback to integer on rata-rata line: {candidate_int}")
+                return float(candidate_int)
 
     return 0.0
 
