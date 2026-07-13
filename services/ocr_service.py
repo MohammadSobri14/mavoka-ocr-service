@@ -100,8 +100,9 @@ def process_document(file_bytes: bytes, filename: str, doc_type: str = "cv") -> 
 
                 # collect subsequent short lines (likely skills) until next header-like token
                 stop_collection = False
+                valid_lines = []
                 for j in range(header_idx + 1, len(lines)):
-                    line = lines[j]['text']
+                    line = lines[j]['text'].strip()
                     if not line:
                         continue
                     low = line.lower()
@@ -109,15 +110,36 @@ def process_document(file_bytes: bytes, filename: str, doc_type: str = "cv") -> 
                         stop_collection = True
                         break
                     # skip contact-like lines
-                    if '@' in line or re.search(r'\d', line) or 'http' in line:
+                    if '@' in line or re.search(r'\d{5,}', line) or 'http' in line:
                         continue
-                    # accept short lines up to 8 words
-                    if len(line.split()) <= 8 or re.match(r'^[\-•\*]\s+', line):
-                        collected.append(line.strip())
-                    else:
-                        # long sentence probably not a skill -> stop
+                    # if we hit a long sentence with no commas, it might be a profile text, stop collection
+                    if len(line.split()) > 12 and ',' not in line and not re.match(r'^[\-•\*]\s+', line):
                         stop_collection = True
                         break
+                    valid_lines.append(line)
+                    
+                if valid_lines:
+                    has_comma = any(',' in l for l in valid_lines)
+                    if has_comma:
+                        logical_lines = []
+                        curr = ""
+                        for line in valid_lines:
+                            if re.match(r'^[\-•\*]\s+', line):
+                                if curr: logical_lines.append(curr)
+                                curr = line
+                            else:
+                                if curr: curr += " " + line
+                                else: curr = line
+                        if curr: logical_lines.append(curr)
+                        
+                        for l_line in logical_lines:
+                            parts = [p.strip().rstrip('.;') for p in l_line.split(',') if p.strip()]
+                            collected.extend(parts)
+                    else:
+                        for line in valid_lines:
+                            if len(line.split()) <= 8 or re.match(r'^[\-•\*]\s+', line):
+                                collected.append(line.rstrip('.;'))
+                                
                 if stop_collection:
                     continue
 
@@ -207,6 +229,8 @@ def extract_skills_from_pdf_bytes(file_bytes: bytes, skill_type: str = "hard") -
         
         for blk in candidates:
             stop_collection = False
+            valid_lines = []
+            
             for ln in blk['text'].splitlines():
                 line = ln.strip()
                 if not line:
@@ -217,14 +241,32 @@ def extract_skills_from_pdf_bytes(file_bytes: bytes, skill_type: str = "hard") -
                     stop_collection = True
                     break
                 # skip contact-like or sentence-like lines
-                if '@' in line or re.search(r'\d', line) or 'http' in line:
+                if '@' in line or re.search(r'\d{5,}', line) or 'http' in line:
                     continue
-                # accept short lines (<=8 words) or bullet markers
-                if len(line.split()) <= 8 or re.match(r'^[\-•\*]\s+', line):
-                    collected.append(line)
+                valid_lines.append(line)
+                
+            if valid_lines:
+                has_comma = any(',' in l for l in valid_lines)
+                if has_comma:
+                    logical_lines = []
+                    curr = ""
+                    for line in valid_lines:
+                        if re.match(r'^[\-•\*]\s+', line):
+                            if curr: logical_lines.append(curr)
+                            curr = line
+                        else:
+                            if curr: curr += " " + line
+                            else: curr = line
+                    if curr: logical_lines.append(curr)
+                    
+                    for l_line in logical_lines:
+                        parts = [p.strip().rstrip('.;') for p in l_line.split(',') if p.strip()]
+                        collected.extend(parts)
                 else:
-                    # ignore long lines
-                    continue
+                    for line in valid_lines:
+                        if len(line.split()) <= 8 or re.match(r'^[\-•\*]\s+', line):
+                            collected.append(line.rstrip('.;'))
+                            
             if stop_collection:
                 break
 

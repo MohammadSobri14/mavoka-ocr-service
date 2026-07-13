@@ -79,7 +79,7 @@ def _extract_section_lines(raw_text: str, header_variants: List[str]) -> List[st
     known_headers = [
         'profil', 'profile', 'summary', 'pendidikan', 'education', 'portofolio', 'portfolio',
         'hard skills', 'soft skills', 'work', 'projects', 'pengalaman', 'certifications',
-        'pengalaman kerja', 'pengalaman organisasi', 'keahlian', 'keterampilan', 'skill', 'skills',
+        'pengalaman kerja', 'pengalaman organisasi', 'keahlian', 'keterampilan teknis', 'skill', 'skills',
         'sertifikasi', 'bahasa', 'languages', 'contact', 'kontak', 'referensi'
     ]
     blank_count = 0
@@ -184,6 +184,7 @@ def parse_structured_data(raw_text: str, doc_type: str = "cv") -> dict:
         # Filter hard skills: remove any item containing emails/phones/urls or
         # obviously personal/profile text (long sentences). Keep short skill-like tokens.
         def _is_skill_token(s: str) -> bool:
+            """Validator for hard skills — strict: no digits, short tokens only."""
             if not s:
                 return False
             low = s.lower()
@@ -199,29 +200,61 @@ def parse_structured_data(raw_text: str, doc_type: str = "cv") -> dict:
                 return False
             return True
 
+        def _is_soft_skill_token(s: str) -> bool:
+            """Validator for soft skills — relaxed: allow multi-word interpersonal phrases."""
+            if not s:
+                return False
+            low = s.lower()
+            # Reject contact-info patterns
+            if '@' in s or re.search(r'https?://', s) or re.search(r'www\.', s):
+                return False
+            # Reject phone numbers (5+ consecutive digits)
+            if re.search(r'\d{5,}', s):
+                return False
+            # Drop very long lines (likely full sentences/profile text, not a skill label)
+            if len(s.split()) > 10:
+                return False
+            # drop common profile/bio keywords
+            if any(k in low for k in ('profil', 'alamat', 'nama', 'ttl', 'tanggal lahir', 'tempat', 'telepon', 'email')):
+                return False
+            return True
+
         parsed['hard_skills'] = [s for s in (x for x in hard_skills) if _is_skill_token(s)]
 
-        # Soft skills
         # Soft skills: only from explicit soft skills section (including Indonesian variants)
         ss_lines = _extract_section_lines(raw_text, [
             'soft skills', 'interpersonal skills', 'skill non teknis', 'softskill',
             'keterampilan interpersonal', 'keterampilan non teknis', 'keterampilan lunak'
         ])
-        soft_skills = []
+        valid_ss_lines = []
         for l in ss_lines:
-            # If the line appears to contain contact info (emails/phones), skip the whole line
-            if re.search(r'[@]', l) or re.search(r'\d{2,}', l) or re.search(r'https?://', l) or 'www.' in l:
-                continue
-            if ',' in l:
-                # If any comma-separated token looks like contact info, skip the entire line
-                parts = [s.strip() for s in l.split(',') if s.strip()]
-                if any(re.search(r'[@\d]|https?://|www\.', p) for p in parts):
-                    continue
-                soft_skills.extend(parts)
+            if re.search(r'[@]', l) or re.search(r'https?://', l) or 'www.' in l: continue
+            if re.search(r'\d{5,}', l): continue
+            valid_ss_lines.append(l.strip())
+            
+        soft_skills = []
+        if valid_ss_lines:
+            has_comma = any(',' in l for l in valid_ss_lines)
+            if has_comma:
+                curr = ""
+                for l in valid_ss_lines:
+                    if re.match(r'^[\-•\*]\s+', l):
+                        if curr:
+                            parts = [s.strip().rstrip('.;') for s in curr.split(',') if s.strip()]
+                            soft_skills.extend(parts)
+                        curr = l
+                    else:
+                        if curr: curr += " " + l
+                        else: curr = l
+                if curr:
+                    parts = [s.strip().rstrip('.;') for s in curr.split(',') if s.strip()]
+                    soft_skills.extend(parts)
             else:
-                soft_skills.append(l.strip())
-        # Filter soft skills similarly to avoid contact/profile noise
-        parsed['soft_skills'] = [s for s in soft_skills if _is_skill_token(s)]
+                for l in valid_ss_lines:
+                    clean = l.strip().rstrip('.;')
+                    if clean: soft_skills.append(clean)
+        # Filter soft skills with a dedicated, less aggressive validator
+        parsed['soft_skills'] = [s for s in soft_skills if _is_soft_skill_token(s)]
 
         # Portofolio / Portfolio (group contiguous non-empty lines into items)
         # Portfolio: only from explicit portfolio/portofolio/projects section (include 'project' variants)
